@@ -133,6 +133,7 @@ func (pl *TargetLoadPacking) Score(ctx context.Context, cycleState *framework.Cy
 		if metric.Type == watcher.CPU {
 			if metric.Operator == watcher.Average || metric.Operator == watcher.Latest {
 				nodeCPUUtilPercent = metric.Value
+				klog.V(6).InfoS("Getting node CPU", "nodeCPUUtilPercent", nodeCPUUtilPercent);
 				cpuMetricFound = true
 			}
 		}
@@ -145,7 +146,7 @@ func (pl *TargetLoadPacking) Score(ctx context.Context, cycleState *framework.Cy
 	nodeCPUCapMillis := float64(nodeInfo.Node().Status.Capacity.Cpu().MilliValue())
 	nodeCPUUtilMillis := (nodeCPUUtilPercent / 100) * nodeCPUCapMillis
 
-	klog.V(6).InfoS("Calculating CPU utilization and capacity", "nodeName", nodeName, "cpuUtilMillis", nodeCPUUtilMillis, "cpuCapMillis", nodeCPUCapMillis)
+	klog.V(6).InfoS("Calculating CPU utilization and capacity", "nodeName", nodeName, "cpuUtilMillis", nodeCPUUtilMillis, "cpuCapMillis", nodeCPUCapMillis, "nodeCPUUtilPercent", nodeCPUUtilPercent)
 
 	var missingCPUUtilMillis int64 = 0
 	pl.eventHandler.RLock()
@@ -158,6 +159,7 @@ func (pl *TargetLoadPacking) Score(ctx context.Context, cycleState *framework.Cy
 			(allMetrics.Window.End-info.Timestamp.Unix()) < metricsAgentReportingIntervalSeconds {
 			for _, container := range info.Pod.Spec.Containers {
 				missingCPUUtilMillis += PredictUtilisation(&container)
+				klog.V(6).InfoS("        Predicted utilisation for", "pod", info.Pod.Name, "container", container.Name, "node", nodeName, "predictedUtil", PredictUtilisation(&container), "missing", missingCPUUtilMillis)
 			}
 			missingCPUUtilMillis += info.Pod.Spec.Overhead.Cpu().MilliValue()
 			klog.V(6).InfoS("Missing utilization for pod", "podName", info.Pod.Name, "missingCPUUtilMillis", missingCPUUtilMillis)
@@ -170,18 +172,27 @@ func (pl *TargetLoadPacking) Score(ctx context.Context, cycleState *framework.Cy
 	if nodeCPUCapMillis != 0 {
 		predictedCPUUsage = 100 * (nodeCPUUtilMillis + float64(curPodCPUUsage) + float64(missingCPUUtilMillis)) / nodeCPUCapMillis
 	}
+	klog.V(6).InfoS("Predicting CPU usage:", "predictedCPUUsage", predictedCPUUsage, "nodeCPUUtilMillis", nodeCPUUtilMillis,
+		"curPodCPUUsage", curPodCPUUsage, "missingCPUUtilMillis", missingCPUUtilMillis, "nodeCPUUtilMillis", nodeCPUUtilMillis)
 	if predictedCPUUsage > float64(hostTargetUtilizationPercent) {
 		if predictedCPUUsage > 100 {
+			klog.V(6).InfoS("Score for host (above 100% usage)", "pod", pod.Name, "nodeName", nodeName, "capacity", nodeCPUCapMillis, "score", score,
+				"predicted CPU usage", predictedCPUUsage, "target CPU usage", hostTargetUtilizationPercent,
+				"current usage", float64(curPodCPUUsage), "missing utilization", missingCPUUtilMillis)
 			return score, framework.NewStatus(framework.Success, "")
 		}
-		penalisedScore := int64(math.Round(float64(hostTargetUtilizationPercent) * (100 - predictedCPUUsage) / (100 - float64(hostTargetUtilizationPercent))))
-		klog.V(6).InfoS("Penalised score for host", "nodeName", nodeName, "penalisedScore", penalisedScore)
+		// penalisedScore := int64(math.Round(float64(hostTargetUtilizationPercent) * (100 - predictedCPUUsage) / (100 - float64(hostTargetUtilizationPercent))))
+		penalisedScore := int64(math.Round(100 - predictedCPUUsage))
+		klog.V(6).InfoS("Penalised score for host", "pod", pod.Name, "nodeName", nodeName, "penalisedScore", penalisedScore, "targetUtilization",
+			hostTargetUtilizationPercent, "predictedCPU", predictedCPUUsage)
 		return penalisedScore, framework.NewStatus(framework.Success, "")
 	}
 
 	score = int64(math.Round((100-float64(hostTargetUtilizationPercent))*
 		predictedCPUUsage/float64(hostTargetUtilizationPercent) + float64(hostTargetUtilizationPercent)))
-	klog.V(6).InfoS("Score for host", "nodeName", nodeName, "score", score)
+	klog.V(6).InfoS("Score for host", "predictedUsage", predictedCPUUsage, "pod", pod.Name, "nodeName", nodeName, "capacity", nodeCPUCapMillis, "score", score,
+		"predicted CPU usage", predictedCPUUsage, "target CPU usage", hostTargetUtilizationPercent,
+		"current usage", float64(curPodCPUUsage), "missing utilization", missingCPUUtilMillis)
 	return score, framework.NewStatus(framework.Success, "")
 }
 
